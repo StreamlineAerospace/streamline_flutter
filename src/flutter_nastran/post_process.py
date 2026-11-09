@@ -8,7 +8,6 @@ plt.style.use("bmh")
 
 # Copyright (C) <2026>, Streamline Aerospace. All rights reserved.
 
-
 def extract_vf_vg_data(f06_path: str) -> dict:
     """Extracts raw flutter data from a NASTRAN SOL 145 .f06 file using pyNastran."""
     flutters = make_flutter_response(f06_path)
@@ -120,12 +119,50 @@ def repair_vf_vg_curves(vf_vg_data: dict) -> dict:
     return repaired_dict
 
 
+def get_flutter_onset(vf_vg_data: dict, damping_threshold: float):
+
+    threshold_crossings = []
+
+    for key, data in vf_vg_data.items():
+        
+        velocity = data["velocity"]
+        damping = data["damping"]
+        frequency = data["frequency"]
+
+        # 1. Identify frequency at lowest velocity (v = 0)
+        v0_idx = np.argmin(np.abs(velocity))
+        f_v0 = frequency[v0_idx]
+        
+        for i in range(len(velocity) - 1):
+            g1, g2 = damping[i], damping[i + 1]
+            v1, v2 = velocity[i], velocity[i + 1]
+
+            # Upward crossing into instability or crossing through threshold
+            if (g1 - damping_threshold) * (
+                g2 - damping_threshold
+            ) <= 0 and g1 != g2:
+                v_cross = (
+                    v1
+                    + (damping_threshold - g1) / (g2 - g1) * (v2 - v1)
+                )
+                threshold_crossings.append(
+                    {
+                        "mode": key,
+                        "v_cross": v_cross,
+                        "f_v0": f_v0,
+                        "upward": g2 > g1,
+                    }
+                )
+
+    return threshold_crossings
+
+
 def make_vf_vg_plot(
     vf_vg_data: dict,
     suptitle: str = None,
     mode_floor_Hz: float = 0.0,
     damping_threshold: float = None,
-    save_plot: bool = False,
+    figure_savepath: str | Path = None,
 ):
     """Generates standard V-g and V-f subplots with threshold scanning and annotations.
 
@@ -146,7 +183,6 @@ def make_vf_vg_plot(
         2, 1, figsize=(9, 8), sharex=True, constrained_layout=True
     )
 
-    threshold_crossings = []
     v_all = []
 
     for key, data in vf_vg_data.items():
@@ -185,27 +221,10 @@ def make_vf_vg_plot(
         )
 
         # 3. Check for threshold crossing via linear interpolation
+        threshold_crossings = []
         if damping_threshold is not None:
-            for i in range(len(velocity) - 1):
-                g1, g2 = damping[i], damping[i + 1]
-                v1, v2 = velocity[i], velocity[i + 1]
-
-                # Upward crossing into instability or crossing through threshold
-                if (g1 - damping_threshold) * (
-                    g2 - damping_threshold
-                ) <= 0 and g1 != g2:
-                    v_cross = (
-                        v1
-                        + (damping_threshold - g1) / (g2 - g1) * (v2 - v1)
-                    )
-                    threshold_crossings.append(
-                        {
-                            "mode": key,
-                            "v_cross": v_cross,
-                            "f_v0": f_v0,
-                            "upward": g2 > g1,
-                        }
-                    )
+            threshold_crossings = get_flutter_onset(vf_vg_data=vf_vg_data,
+                                                    damping_threshold=damping_threshold)
 
     # Reference lines on V-g plot
     ax_vg.axhline(
@@ -274,28 +293,11 @@ def make_vf_vg_plot(
     ax_vf.set_xlabel("Mach Number")
     ax_vf.set_ylabel("Frequency (Hz)")
 
-    savetitle=None
     if suptitle:
         fig.suptitle(suptitle)
-        savetitle = suptitle + ".png"
 
-    if save_plot: 
-        fig.savefig(savetitle)
-
-
-if __name__ == "__main__":
-    search_path = Path("f06")
-    matching_files = sorted(list(search_path.glob("*.f06")))
-
-    for f06_file in matching_files:
-        raw_data = extract_vf_vg_data(str(f06_file))
-        clean_data = repair_vf_vg_curves(raw_data)
-
-        # Plots structural modes (filtering rigid body modes < 1.0 Hz)
-        # and annotates the lowest flutter crossing at g = 0.03
-        make_vf_vg_plot(
-            clean_data,
-            suptitle=f06_file.name,
-            mode_floor_Hz=0.001,
-            damping_threshold=0.03,
-            save_plot=True)
+    if figure_savepath is not None: 
+        try: 
+            fig.savefig(figure_savepath._str.split(".")[0] + ".png")
+        except: 
+            print(f"Failed to save figure to {figure_savepath._str}")

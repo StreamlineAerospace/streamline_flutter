@@ -3,6 +3,7 @@ import numpy as np
 from flutter_nastran import stdatm1976 as atm 
 from pyNastran.bdf.bdf import BDF
 from datetime import datetime
+import math
 import os
 
 """
@@ -37,7 +38,7 @@ def flutter_card(altitude_ft:float, Mach_sweep:list, freq_interval_Hz:list, refe
     freq_red_min_Hz = min(freq_interval_Hz)*math.pi*reference_chord_in/v_in_s
     freq_red_max_Hz = max(freq_interval_Hz)*math.pi*reference_chord_in/v_in_s
     
-    model = BDF()
+    model = BDF(debug=False, log=None)
 
     # Custom Header Comment
     header_comment = f"""$=======================================================================
@@ -126,7 +127,7 @@ $-----------------------------------------------------------------------"""
     print(f"Deck successfully generated: {output_path}")
 
     # Self-validation check
-    verify_model = BDF()
+    verify_model = BDF(debug=False, log=None)
     verify_model.read_bdf(output_path, xref=False)
 
     #add header comment and delete unnecessary comments from pyNastran
@@ -180,7 +181,7 @@ def generate_sol145_master_bdf(flutter_card_path:str, struct_card_path:str, aero
 
     pre_bulk_lines.append("BEGIN BULK\n")
 
-    model = BDF()
+    model = BDF(debug=False, log=None)
     # PARAM Cards
     model.add_param("POST", [-1]) #Generates an OUTPUT2 results file.
     model.add_param("OGEOM", ["NO"]) #output model data to .op2 file? 
