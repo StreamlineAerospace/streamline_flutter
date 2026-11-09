@@ -10,6 +10,6 @@ dependencies:
   - matplotlib
   - ipykernel
   - pytest
-  -tkinter
+  - pandas
   - pip:
       - pyNastran

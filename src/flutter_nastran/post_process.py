@@ -1,6 +1,8 @@
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import io
 from pyNastran.f06.parse_flutter import make_flutter_response
 from scipy.optimize import linear_sum_assignment
 
@@ -117,6 +119,65 @@ def repair_vf_vg_curves(vf_vg_data: dict) -> dict:
         }
 
     return repaired_dict
+
+
+def load_flutter_csv(csv_path: str | Path) -> dict:
+    """Reads a flutter CSV export and returns a nested dictionary of modes.
+
+    Parameters
+    ----------
+    csv_path : str or Path
+        Path to the CSV file containing separate 'Frequency (Hz)' and 'Damping'
+        tables.
+
+    Returns
+    -------
+    dict
+        Dictionary structured as:
+        {
+            "Mode 1": {
+                "velocity": [Mach Number, ...],
+                "frequency": [freq_Hz, ...],
+                "damping": [damping, ...]
+            },
+            ...
+        }
+    """
+    with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+
+    # The CSV consists of a "Frequency (Hz)" section and a "Damping" section
+    parts = content.split("Damping")
+    freq_raw = (
+        parts[0].replace("Frequency (Hz)", "").strip()
+    )  # remove section header
+    damp_raw = parts[1].strip()
+
+    # Load both tables into pandas DataFrames
+    df_freq = pd.read_csv(io.StringIO(freq_raw))
+    df_damp = pd.read_csv(io.StringIO(damp_raw))
+
+    # Strip whitespace from column headers and drop trailing unnamed columns
+    df_freq.columns = [c.strip() for c in df_freq.columns]
+    df_damp.columns = [c.strip() for c in df_damp.columns]
+    df_freq = df_freq.loc[:, ~df_freq.columns.str.contains(r"^Unnamed")]
+    df_damp = df_damp.loc[:, ~df_damp.columns.str.contains(r"^Unnamed")]
+
+    # Extract all mode columns present in the file
+    mode_cols = [c for c in df_freq.columns if c.startswith("Mode")]
+
+    # Build the dictionary
+    flutter_dict = {}
+    velocity_list = df_freq["Mach Number"].tolist()
+
+    for mode in mode_cols:
+        flutter_dict[mode] = {
+            "velocity": velocity_list,
+            "frequency": df_freq[mode].tolist(),
+            "damping": df_damp[mode].tolist(),
+        }
+
+    return flutter_dict
 
 
 def get_flutter_onset(vf_vg_data: dict, damping_threshold: float):

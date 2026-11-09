@@ -3,7 +3,7 @@ flutter_nastran: Automation and post-processing tools for NASTRAN SOL 145 flutte
 """
 
 from flutter_nastran.bdf import flutter_card, generate_sol145_master_bdf, split_nastran_deck
-from flutter_nastran.post_process import extract_vf_vg_data, make_vf_vg_plot, repair_vf_vg_curves, get_flutter_onset
+from flutter_nastran.post_process import extract_vf_vg_data, make_vf_vg_plot, repair_vf_vg_curves, get_flutter_onset, load_flutter_csv
 from flutter_nastran.runner import run_nastran
 from flutter_nastran.gui import select_directory, find_bdf_files, get_subdirectories
 
@@ -19,4 +19,5 @@ __all__ = [
     "find_bdf_files",
     "get_subdirectories",
     "get_flutter_onset",
+    "load_flutter_csv"
 ]
