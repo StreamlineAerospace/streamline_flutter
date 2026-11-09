@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flutter-nastran"
+version = "0.1.0"
+description = "Automation tools for NASTRAN SOL 145 flutter analyses and FEMAP workflows"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pyNastran",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ipykernel",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

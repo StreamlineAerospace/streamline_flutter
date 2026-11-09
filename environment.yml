@@ -1,0 +1,14 @@
+name: nastran_flutter
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - ipykernel
+  - pytest
+  - pip:
+      - pyNastran

@@ -1,7 +1,6 @@
 
 import numpy as np
-import stdatm1976 as atm 
-import math 
+from flutter_nastran import stdatm1976 as atm 
 from pyNastran.bdf.bdf import BDF
 from datetime import datetime
 import os

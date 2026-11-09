@@ -1,0 +1,24 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# NASTRAN run scratch & output files
+*.f04
+*.f06
+*.op2
+*.log
+*.xdb
+*.tmp
+*.MASTER
+*.DBALL
+
+# OS files
+desktop.ini
+.DS_Store
