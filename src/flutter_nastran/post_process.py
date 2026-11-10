@@ -6,7 +6,11 @@ import io
 from pyNastran.f06.parse_flutter import make_flutter_response
 from scipy.optimize import linear_sum_assignment
 
+#set plotting style
 plt.style.use("bmh")
+try:
+    plt.rcParams['font.family'] = 'Saira'
+except: pass 
 
 # Copyright (C) <2026>, Streamline Aerospace. All rights reserved.
 
@@ -199,13 +203,8 @@ def get_flutter_onset(vf_vg_data: dict, damping_threshold: float):
             v1, v2 = velocity[i], velocity[i + 1]
 
             # Upward crossing into instability or crossing through threshold
-            if (g1 - damping_threshold) * (
-                g2 - damping_threshold
-            ) <= 0 and g1 != g2:
-                v_cross = (
-                    v1
-                    + (damping_threshold - g1) / (g2 - g1) * (v2 - v1)
-                )
+            if (g1 - damping_threshold) * (g2 - damping_threshold) <= 0 and g1 != g2:
+                v_cross = (v1 + (damping_threshold - g1) / (g2 - g1) * (v2 - v1))
                 threshold_crossings.append(
                     {
                         "mode": key,
@@ -287,6 +286,9 @@ def make_vf_vg_plot(
             threshold_crossings = get_flutter_onset(vf_vg_data=vf_vg_data,
                                                     damping_threshold=damping_threshold)
 
+            #trim threshold_crossings for modes below mode_floor_Hz
+            threshold_crossings = [x for x in threshold_crossings if vf_vg_data[x["mode"]]["frequency"][0] >= mode_floor_Hz]
+
     # Reference lines on V-g plot
     ax_vg.axhline(
         0.0,
@@ -331,7 +333,7 @@ def make_vf_vg_plot(
         x_text_offset = 0.05 * v_span
 
         ax_vg.annotate(
-            f"{m_crit} crosses $g={damping_threshold}$\nat $M={v_crit:.2f}$",
+            f"{m_crit} unstable at $g={damping_threshold}$\nat $M={v_crit:.2f}$",
             xy=(v_crit, damping_threshold),
             xytext=(v_crit + x_text_offset, damping_threshold + 0.05),
             arrowprops=dict(

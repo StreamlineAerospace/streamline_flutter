@@ -161,7 +161,10 @@ def generate_sol145_master_bdf(flutter_card_path:str, struct_card_path:str, aero
     fid = 30 #flutter identification number #!Hardcoded
 
     flutter_card_name = flutter_card_path.split("/")[-1]
-    output_file = f"{output_dir}/xRUN_{base_title}_{flutter_card_name.split(".")[0]}.bdf"
+ 
+    title = struct_card_path.split("/")[-1]
+    title = title.split("_STRUCT")[0]
+    output_file = f"{output_dir}/xRUN_{title}_{flutter_card_name.split(".")[0]}.bdf"
  
     pre_bulk_lines = ["INIT MASTER(S)\n",
                         "NASTRAN SYSTEM(442)=-1,SYSTEM(319)=1\n",

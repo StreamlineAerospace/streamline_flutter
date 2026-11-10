@@ -13,14 +13,16 @@ if __name__ == "__main__":
     matching_files = list(Path(working_dir).rglob("*.csv"))
 
     for csv_file in matching_files: 
-        res = load_flutter_csv(csv_path=csv_file)
-
-        make_vf_vg_plot(
-                res,
-                suptitle=csv_file.name,
-                mode_floor_Hz=0.001,
-                damping_threshold=damping_threshold,
-                figure_savepath=csv_file)
-        print(f"Unable to plot data in {csv_file.name}. Continuing")
+        try:
+            res = load_flutter_csv(csv_path=csv_file)
+            make_vf_vg_plot(
+                    res,
+                    suptitle=csv_file.name,
+                    mode_floor_Hz=0.001,
+                    damping_threshold=damping_threshold,
+                    figure_savepath=csv_file)
+        except: 
+            print(f"Unable to plot data in {csv_file.name}. Continuing")
+            continue
 
     plt.show()
