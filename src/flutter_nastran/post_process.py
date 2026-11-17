@@ -250,8 +250,8 @@ def make_vf_vg_plot(
     suptitle: str = None,
     mode_floor_Hz: float = 0.0,
     damping_threshold: float = None,
-    xaxes:list = ["keas"],
-    xaxes_labels:list = ["KEAS"],
+    xaxes:list = ["keas", "ktas", "MACH"],
+    xaxes_labels:list = ["KEAS", "KTAS", "MACH"],
     figure_savepath: str | Path = None,
 ):
     """Generates standard V-g and V-f subplots with threshold scanning and annotations.
