@@ -409,7 +409,7 @@ def split_nastran_deck(input_bdf_path: str, output_dir: str) -> list:
 
 
 def add_whirl_flutter_dmig_to_bdf(
-    bdf_filepath: str, 
+    xRUN_bdf_filepath: str, 
     hub_grid_id: int, 
     gyro_dict: dict, 
     aero_damping_dict: dict, 
@@ -425,7 +425,7 @@ def add_whirl_flutter_dmig_to_bdf(
     
     # 1. Load the existing master BDF model
     model = BDF()
-    model.read_bdf(bdf_filepath)
+    model.read_bdf(xRUN_bdf_filepath)
     
     # 2. Apply Nastran Sign Conventions for the Left-Hand Side
     # [K_DMIG] = -[K_aero]
@@ -488,7 +488,7 @@ def add_whirl_flutter_dmig_to_bdf(
         cc.add_parameter_to_global_subcase('B2PP', 'BPROPTOT')
 
     # 6. Save the modified BDF with "_WHIRL" appended
-    file_dir, file_name = os.path.split(bdf_filepath)
+    file_dir, file_name = os.path.split(xRUN_bdf_filepath)
     name, ext = os.path.splitext(file_name)
     output_bdf_path = os.path.join(file_dir, f"{name}_WHIRL{ext}")
     
