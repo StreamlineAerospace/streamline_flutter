@@ -406,3 +406,93 @@ def split_nastran_deck(input_bdf_path: str, output_dir: str) -> list:
     )
 
     return output_struc_path, output_aero_path
+
+
+def add_whirl_flutter_dmig_to_bdf(
+    xRUN_bdf_filepath: str, 
+    hub_grid_id: int, 
+    gyro_dict: dict, 
+    aero_damping_dict: dict, 
+    aero_stiffness_dict: dict
+):
+    """
+    Reads a master NASTRAN BDF, applies whirl flutter DMIG matrices from dictionaries, 
+    adds complex eigenvalue solvers, and saves a new file with '_WHIRL' appended.
+    
+    Dictionaries should be formatted with (row_dof, col_dof) as keys:
+    Example: gyro_dict = {(5, 6): 1885.0, (6, 5): -1885.0}
+    """
+    
+    # 1. Load the existing master BDF model
+    model = BDF()
+    model.read_bdf(xRUN_bdf_filepath)
+    
+    # 2. Apply Nastran Sign Conventions for the Left-Hand Side
+    # [K_DMIG] = -[K_aero]
+    # [B_DMIG] = [G_gyro] - [B_aero]
+    k_dmig = {}
+    b_dmig = {}
+    
+    # Process Aerodynamic Stiffness
+    for (r, c), val in aero_stiffness_dict.items():
+        if c not in k_dmig: k_dmig[c] = {}
+        k_dmig[c][r] = -val
+        
+    # Process combined Gyroscopic and Aerodynamic Damping
+    all_b_keys = set(gyro_dict.keys()).union(set(aero_damping_dict.keys()))
+    for (r, c) in all_b_keys:
+        g_val = gyro_dict.get((r, c), 0.0)
+        ba_val = aero_damping_dict.get((r, c), 0.0)
+        combined_val = g_val - ba_val
+        
+        if abs(combined_val) > 1e-12: # Filter out numeric zeros
+            if c not in b_dmig: b_dmig[c] = {}
+            b_dmig[c][r] = combined_val
+
+    # 3. Helper Function to write square, unsymmetric DMIG matrices (IFO=1)
+    def write_dmig_matrix(matrix_name, matrix_dict):
+        if not matrix_dict: return
+        
+        # Add DMIG Header: IFO=1 (Square), TIN=2 (Double Prec), TOUT=2 (Double Prec)
+        model.add_card(['DMIG', matrix_name, 0, 1, 2, 2], 'DMIG')
+        
+        # Iterate over columns (CJ)
+        for col in sorted(matrix_dict.keys()):
+            # Start column card: ['DMIG', NAME, GJ, CJ, blank]
+            col_card = ['DMIG', matrix_name, hub_grid_id, col, None]
+            
+            # Iterate over rows (CI) in this column
+            for row in sorted(matrix_dict[col].keys()):
+                val = matrix_dict[col][row]
+                # Append Row Grid (GI), Row DOF (CI), Real Value (X), Imag Value (Blank)
+                col_card.extend([hub_grid_id, row, val, None])
+            
+            # Add column to model (pyNastran automatically formats 8-field continuations)
+            model.add_card(col_card, 'DMIG')
+
+    # Inject the matrices into the Bulk Data
+    write_dmig_matrix('KAEROP', k_dmig)
+    write_dmig_matrix('BPROPTOT', b_dmig)
+
+    # 4. Add Complex Eigenvalue Solver to Bulk Data
+    # Required for skew-symmetric/unsymmetric matrices
+    # Format: [EIGC, SID, METHOD, NORM, G, C, E, ND]
+    model.add_card(['EIGC', 20, 'HESS', 'MAX', None, None, None, None, 30], 'EIGC')
+
+    # 5. Update Case Control Deck
+    cc = model.case_control_deck
+    if cc is not None:
+        if not cc.has_parameter('CMETHOD'):
+            cc.add_parameter_to_global_subcase('CMETHOD', 20)
+        cc.add_parameter_to_global_subcase('K2PP', 'KAEROP')
+        cc.add_parameter_to_global_subcase('B2PP', 'BPROPTOT')
+
+    # 6. Save the modified BDF with "_WHIRL" appended
+    file_dir, file_name = os.path.split(xRUN_bdf_filepath)
+    name, ext = os.path.splitext(file_name)
+    output_bdf_path = os.path.join(file_dir, f"{name}_WHIRL{ext}")
+    
+    model.write_bdf(output_bdf_path)
+    print(f"Successfully generated: {output_bdf_path}")
+    
+    return output_bdf_path 

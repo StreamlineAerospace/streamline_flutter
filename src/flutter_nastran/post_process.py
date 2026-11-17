@@ -192,11 +192,15 @@ def load_flutter_csv(csv_path: str | Path) -> dict:
 
     # Build the dictionary
     flutter_dict = {}
-    velocity_list = df_freq["Mach Number"].tolist()
+    mach_list = df_freq["Mach Number"].tolist()
+    keas_list = df_freq["Equivalent Airspeed (knots)"].tolist()
+    ktas_list = df_freq["True Airspeed (knots)"].tolist()
 
     for mode in mode_cols:
         flutter_dict[mode] = {
-            "velocity": velocity_list,
+            "mach": mach_list,
+            "keas": keas_list,
+            "ktas": ktas_list,
             "frequency": df_freq[mode].tolist(),
             "damping": df_damp[mode].tolist(),
         }
