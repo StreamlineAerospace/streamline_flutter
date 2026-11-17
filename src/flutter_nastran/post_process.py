@@ -5,6 +5,7 @@ import pandas as pd
 import io
 from pyNastran.f06.parse_flutter import make_flutter_response
 from scipy.optimize import linear_sum_assignment
+from flutter_nastran import stdatm1976
 
 #set plotting style
 plt.style.use("bmh")
@@ -14,7 +15,7 @@ except: pass
 
 # Copyright (C) <2026>, Streamline Aerospace. All rights reserved.
 
-def extract_vf_vg_data(f06_path: str) -> dict:
+def extract_vf_vg_data(f06_path: str, altitude_ft: float) -> dict:
     """Extracts raw flutter data from a NASTRAN SOL 145 .f06 file using pyNastran."""
     flutters = make_flutter_response(f06_path)
 
@@ -24,9 +25,16 @@ def extract_vf_vg_data(f06_path: str) -> dict:
     else:
         flutter = flutters
 
-    i_vel = flutter.ivelocity  # Index 4
     i_dmp = flutter.idamping  # Index 5
     i_frq = flutter.ifreq  # Index 6
+    i_mach = flutter.imach
+
+    #true and equivalent airspeeds constants 
+    rho_slug_ft3 = stdatm1976.air_density(h_ft=altitude_ft)
+    rho0_slug_ft3 = stdatm1976.air_density(h_ft=0) 
+    a_ft_s = stdatm1976.sonic_speed(h_ft=altitude_ft)
+    a_kts = 0.592484*a_ft_s
+
 
     results = flutter.results
     modes = flutter.modes
@@ -34,9 +42,11 @@ def extract_vf_vg_data(f06_path: str) -> dict:
     res_dict = {}
     for mode in modes:
         res_dict[f"Mode {mode}"] = {
-            "velocity": results[mode - 1][:, i_vel].copy(),
+            "mach": results[mode - 1][:, i_mach].copy(),
             "damping": results[mode - 1][:, i_dmp].copy(),
             "frequency": results[mode - 1][:, i_frq].copy(),
+            "keas": results[mode - 1][:, i_mach].copy()*a_kts*np.sqrt(rho_slug_ft3/rho0_slug_ft3),
+            "ktas": results[mode - 1][:, i_mach].copy()*a_kts
         }
 
     return res_dict
@@ -53,19 +63,25 @@ def repair_vf_vg_curves(vf_vg_data: dict) -> dict:
     if num_modes <= 1:
         return vf_vg_data
 
-    num_steps = len(vf_vg_data[mode_keys[0]]["velocity"])
+    num_steps = len(vf_vg_data[mode_keys[0]]["mach"])
 
     freq_raw = np.array([vf_vg_data[k]["frequency"] for k in mode_keys])
     damp_raw = np.array([vf_vg_data[k]["damping"] for k in mode_keys])
-    vel_raw = np.array([vf_vg_data[k]["velocity"] for k in mode_keys])
+    mach_raw = np.array([vf_vg_data[k]["mach"] for k in mode_keys])
+    keas_raw = np.array([vf_vg_data[k]["keas"] for k in mode_keys])
+    ktas_raw = np.array([vf_vg_data[k]["ktas"] for k in mode_keys])
 
     repaired_freq = np.zeros_like(freq_raw)
     repaired_damp = np.zeros_like(damp_raw)
-    repaired_vel = np.zeros_like(vel_raw)
-
+    repaired_mach = np.zeros_like(mach_raw)
+    repaired_keas = np.zeros_like(keas_raw)
+    repaired_ktas = np.zeros_like(ktas_raw)
+    
     repaired_freq[:, 0] = freq_raw[:, 0]
     repaired_damp[:, 0] = damp_raw[:, 0]
-    repaired_vel[:, 0] = vel_raw[:, 0]
+    repaired_mach[:, 0] = mach_raw[:, 0]
+    repaired_keas[:, 0] = keas_raw[:, 0]
+    repaired_ktas[:, 0] = ktas_raw[:, 0]
 
     f_scale = (
         np.std(freq_raw[freq_raw > 0])
@@ -79,14 +95,14 @@ def repair_vf_vg_curves(vf_vg_data: dict) -> dict:
     for k in range(1, num_steps):
         cand_f = freq_raw[:, k]
         cand_d = damp_raw[:, k]
-        cand_v = vel_raw[:, k]
+        cand_v = mach_raw[:, k]
 
         if k == 1:
             pred_f = repaired_freq[:, 0]
             pred_d = repaired_damp[:, 0]
         else:
-            dv_prev = repaired_vel[:, k - 1] - repaired_vel[:, k - 2]
-            dv_curr = cand_v - repaired_vel[:, k - 1]
+            dv_prev = repaired_mach[:, k - 1] - repaired_mach[:, k - 2]
+            dv_curr = cand_v - repaired_mach[:, k - 1]
             safe_dv = np.where(np.abs(dv_prev) > 1e-9, dv_prev, 1.0)
 
             df_dv = (repaired_freq[:, k - 1] - repaired_freq[:, k - 2]) / safe_dv
@@ -112,14 +128,18 @@ def repair_vf_vg_curves(vf_vg_data: dict) -> dict:
         for track_i, cand_j in zip(row_ind, col_ind):
             repaired_freq[track_i, k] = cand_f[cand_j]
             repaired_damp[track_i, k] = cand_d[cand_j]
-            repaired_vel[track_i, k] = cand_v[cand_j]
+            repaired_mach[track_i, k] = cand_v[cand_j]
+            #repaired_keas[track_i, k] = cand_v[cand_j]
+            #repaired_ktas[track_i, k] = cand_v[cand_j]
 
     repaired_dict = {}
     for i, mode_key in enumerate(mode_keys):
         repaired_dict[mode_key] = {
-            "velocity": repaired_vel[i],
+            "mach": repaired_mach[i],
             "damping": repaired_damp[i],
             "frequency": repaired_freq[i],
+            "keas": keas_raw[i],
+            "ktas": ktas_raw[i]
         }
 
     return repaired_dict
@@ -190,25 +210,33 @@ def get_flutter_onset(vf_vg_data: dict, damping_threshold: float):
 
     for key, data in vf_vg_data.items():
         
-        velocity = data["velocity"]
+        mach = data["mach"]
+        keas = data["keas"]
+        ktas = data["ktas"]
         damping = data["damping"]
         frequency = data["frequency"]
 
         # 1. Identify frequency at lowest velocity (v = 0)
-        v0_idx = np.argmin(np.abs(velocity))
-        f_v0 = frequency[v0_idx]
+        m0_idx = np.argmin(np.abs(mach))
+        f_v0 = frequency[m0_idx]
         
-        for i in range(len(velocity) - 1):
+        for i in range(len(mach) - 1):
             g1, g2 = damping[i], damping[i + 1]
-            v1, v2 = velocity[i], velocity[i + 1]
+            m1, m2 = mach[i], mach[i + 1]
+            v1, v2 = ktas[i], ktas[i + 1]
+            ve1, ve2 = keas[i], keas[i + 1]
 
             # Upward crossing into instability or crossing through threshold
             if (g1 - damping_threshold) * (g2 - damping_threshold) <= 0 and g1 != g2:
+                m_cross = (m1 + (damping_threshold - g1) / (g2 - g1) * (m2 - m1))
                 v_cross = (v1 + (damping_threshold - g1) / (g2 - g1) * (v2 - v1))
+                ve_cross = (ve1 + (damping_threshold - g1) / (g2 - g1) * (ve2 - ve1))
                 threshold_crossings.append(
                     {
                         "mode": key,
-                        "v_cross": v_cross,
+                        "mach_cross": m_cross,
+                        "ktas_cross": v_cross,
+                        "keas_cross": ve_cross,
                         "f_v0": f_v0,
                         "upward": g2 > g1,
                     }
@@ -222,6 +250,8 @@ def make_vf_vg_plot(
     suptitle: str = None,
     mode_floor_Hz: float = 0.0,
     damping_threshold: float = None,
+    xaxes:list = ["keas"],
+    xaxes_labels:list = ["KEAS"],
     figure_savepath: str | Path = None,
 ):
     """Generates standard V-g and V-f subplots with threshold scanning and annotations.
@@ -239,32 +269,43 @@ def make_vf_vg_plot(
         Damping value (e.g., 0.03 or 0.0) to scan for flutter onset. The lowest-velocity crossing
         will be marked with a vertical line and an arrow annotation.
     """
+    assert len(xaxes) == len(xaxes_labels)
+
+    def make_converter(x_from, x_to):
+        """Creates an interpolation function between two monotonic 1D arrays."""
+        if x_from[0] > x_from[-1]:  # np.interp requires x_from to be increasing
+            x_from, x_to = x_from[::-1], x_to[::-1]
+        return lambda val: np.interp(val, x_from, x_to)
+
     fig, (ax_vg, ax_vf) = plt.subplots(
-        2, 1, figsize=(9, 8), sharex=True, constrained_layout=True
+        2, 1, figsize=(9, 8), 
+        sharex=True, 
+        constrained_layout=True
     )
 
     v_all = []
 
     for key, data in vf_vg_data.items():
-        velocity = data["velocity"]
         damping = data["damping"]
         frequency = data["frequency"]
+        v_datas = [data[x.lower()] for x in xaxes]
+        
 
         # 1. Identify frequency at lowest velocity (v = 0)
-        v0_idx = np.argmin(np.abs(velocity))
+        v0_idx = np.argmin(np.abs(v_datas[0]))
         f_v0 = frequency[v0_idx]
 
         # Filter out modes below mode_floor_Hz
         if f_v0 < mode_floor_Hz:
             continue
 
-        v_all.append(velocity)
+        v_all.append(v_datas[0])
 
         # 2. Add frequency to legend label: f"{key} = {f_v0:.2f} Hz"
         mode_label = f"{key} = {f_v0:.2f} Hz"
 
         ax_vg.plot(
-            velocity,
+            v_datas[0],
             damping,
             marker="o",
             markersize=3,
@@ -272,13 +313,14 @@ def make_vf_vg_plot(
             label=mode_label,
         )
         ax_vf.plot(
-            velocity,
+            v_datas[0],
             frequency,
             marker="s",
             markersize=3,
             linewidth=1.2,
             label=mode_label,
         )
+
 
         # 3. Check for threshold crossing via linear interpolation
         threshold_crossings = []
@@ -289,15 +331,15 @@ def make_vf_vg_plot(
             #trim threshold_crossings for modes below mode_floor_Hz
             threshold_crossings = [x for x in threshold_crossings if vf_vg_data[x["mode"]]["frequency"][0] >= mode_floor_Hz]
 
-    # Reference lines on V-g plot
-    ax_vg.axhline(
-        0.0,
-        color="red",
-        linestyle="--",
-        linewidth=1.2,
-        label="Flutter Limit ($g=0$)",
-    )
+    ax_vf.set_xlabel(xaxes_labels[0])
 
+    if len(xaxes) > 1: 
+        for i,_ in enumerate(xaxes):
+            if i == 0: continue  
+            ax = ax_vf.secondary_xaxis(-0.22*i, functions=(make_converter(v_datas[0], v_datas[i]), make_converter(v_datas[i], v_datas[0])))
+            ax.set_xlabel(xaxes_labels[i])
+    
+    # Reference lines on V-g plot
     if damping_threshold is not None and damping_threshold != 0.0:
         ax_vg.axhline(
             damping_threshold,
@@ -306,12 +348,13 @@ def make_vf_vg_plot(
             linewidth=1.2,
             label=f"Threshold ($g={damping_threshold}$)",
         )
+    
 
-    # 4. Handle lowest-velocity crossing annotation
+    # Handle lowest-velocity crossing annotation
     if damping_threshold is not None and len(threshold_crossings) > 0:
-        threshold_crossings.sort(key=lambda x: x["v_cross"])
+        threshold_crossings.sort(key=lambda x: x[f"{xaxes[0].lower()}_cross"])
         crit = threshold_crossings[0]
-        v_crit = crit["v_cross"]
+        v_crit = crit[f"{xaxes[0].lower()}_cross"]
         m_crit = crit["mode"]
 
         # Vertical line indicating onset speed on both subplots
@@ -333,7 +376,7 @@ def make_vf_vg_plot(
         x_text_offset = 0.05 * v_span
 
         ax_vg.annotate(
-            f"{m_crit} unstable at $g={damping_threshold}$\nat $M={v_crit:.2f}$",
+            f"{m_crit} unstable at $g={damping_threshold}$\nat {xaxes_labels[0]} = ${v_crit:.2f}$",
             xy=(v_crit, damping_threshold),
             xytext=(v_crit + x_text_offset, damping_threshold + 0.05),
             arrowprops=dict(
@@ -343,17 +386,17 @@ def make_vf_vg_plot(
             fontweight="bold",
             bbox=dict(
                 boxstyle="round,pad=0.35",
-                facecolor="#fff3cd",
-                edgecolor="#856404",
-                alpha=0.9,
+                facecolor="white",
+                edgecolor="black",
+                alpha=0.75,
             ),
         )
+    
 
     # Axis formatting
+    ax_vf.set_xlim([np.nanmin(v_datas[0]), np.nanmax(v_datas[0])])
     ax_vg.set_ylabel("Damping, $g$")
     ax_vg.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-
-    ax_vf.set_xlabel("Mach Number")
     ax_vf.set_ylabel("Frequency (Hz)")
 
     if suptitle:
