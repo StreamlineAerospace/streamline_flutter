@@ -30,9 +30,11 @@ def flutter_card(altitude_ft:float, Mach_sweep:list, freq_interval_Hz:list, refe
 
     #calculate velocity in in/sec 
     a_ft_s = atm.sonic_speed(h_ft=altitude_ft)
+    a_in_s = a_ft_s*12
+
     rho_slinch = 0.000578704*atm.air_density(h_ft=altitude_ft)
     dens_factor = atm.air_density(h_ft=altitude_ft)/atm.air_density(h_ft=0)
-    v_in_s = Mach_sweep*a_ft_s*12
+    v_in_s = Mach_sweep*a_in_s
 
     #calculate min and max reduced frequencies
     freq_red_min_Hz = min(freq_interval_Hz)*math.pi*reference_chord_in/v_in_s
@@ -48,7 +50,7 @@ $
 $Altitude:             {altitude_ft:,.0f} ft
 $Air density:          {rho_slinch:.3E} slinch/in^3
 $Speed of sound:       {a_ft_s:,.1f} ft/sec
-$                        {a_ft_s*12:,.1f} in/sec
+$                        {a_in_s:,.1f} in/sec
 $
 $-----------------------------------------------------------------------
 $Input deck created:   {datetime.now().strftime('%d-%b-%y')}
@@ -57,7 +59,7 @@ $-----------------------------------------------------------------------"""
     # -------------------------------------------------------------------------
     # PARAM entries
     # -------------------------------------------------------------------------
-    model.add_param("VREF", [a_ft_s*12], comment="Convert flutter output velocities from in/sec to Mach number")#[cite: 1]
+    model.add_param("VREF", [a_in_s], comment="Convert flutter output velocities from in/sec to Mach number")#[cite: 1]
     model.add_param("SUPAERO", ["CPM"], comment="Use the CPM method for supersonic conditions")#[cite: 1]
     if complex_mode_output:
         model.add_param(
