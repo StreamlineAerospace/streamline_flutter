@@ -16,38 +16,63 @@ except: pass
 # Copyright (C) <2026>, Streamline Aerospace. All rights reserved.
 
 def extract_vf_vg_data(f06_path: str, altitude_ft: float) -> dict:
-    """Extracts raw flutter data from a NASTRAN SOL 145 .f06 file using pyNastran."""
+    """Extracts raw flutter data from a NASTRAN SOL 145 .f06 file using pyNastran.
+    Concatenates multi-subcase results to maintain a flat dictionary structure."""
+    
     flutters = make_flutter_response(f06_path)
 
-    if isinstance(flutters, dict):
-        subcase_id = list(flutters.keys())[0]
-        flutter = flutters[subcase_id]
-    else:
-        flutter = flutters
+    # Handle standard parsing (single object) vs multi-subcase parsing (dict)
+    if not isinstance(flutters, dict):
+        flutters = {1: flutters}
 
-    i_dmp = flutter.idamping  # Index 5
-    i_frq = flutter.ifreq  # Index 6
-    i_mach = flutter.imach
-
-    #true and equivalent airspeeds constants 
+    # true and equivalent airspeeds constants 
     rho_slug_ft3 = stdatm1976.air_density(h_ft=altitude_ft)
     rho0_slug_ft3 = stdatm1976.air_density(h_ft=0) 
     a_ft_s = stdatm1976.sonic_speed(h_ft=altitude_ft)
-    a_kts = 0.592484*a_ft_s
-
-
-    results = flutter.results
-    modes = flutter.modes
+    a_kts = 0.592484 * a_ft_s
 
     res_dict = {}
-    for mode in modes:
-        res_dict[f"Mode {mode}"] = {
-            "mach": results[mode - 1][:, i_mach].copy(),
-            "damping": results[mode - 1][:, i_dmp].copy(),
-            "frequency": results[mode - 1][:, i_frq].copy(),
-            "keas": results[mode - 1][:, i_mach].copy()*a_kts*np.sqrt(rho_slug_ft3/rho0_slug_ft3),
-            "ktas": results[mode - 1][:, i_mach].copy()*a_kts
-        }
+
+    # Loop through all subcases (Mach numbers) to stitch arrays together
+    for subcase_id, flutter in flutters.items():
+        
+        i_dmp = flutter.idamping  # Index 5
+        i_frq = flutter.ifreq     # Index 6
+        i_mach = flutter.imach
+
+        results = flutter.results
+        modes = flutter.modes
+
+        for mode in modes:
+            mode_key = f"Mode {mode}"
+            
+            # Initialize empty lists for the mode if it doesn't exist yet
+            if mode_key not in res_dict:
+                res_dict[mode_key] = {
+                    "mach": [],
+                    "damping": [],
+                    "frequency": [],
+                    "keas": [],
+                    "ktas": []
+                }
+            
+            # Extract data for this specific subcase/mode
+            mode_data = results[mode - 1]
+            mach_arr = mode_data[:, i_mach].copy()
+            dmp_arr = mode_data[:, i_dmp].copy()
+            frq_arr = mode_data[:, i_frq].copy()
+            
+            # Extend the global mode lists with this subcase's data
+            res_dict[mode_key]["mach"].extend(mach_arr)
+            res_dict[mode_key]["damping"].extend(dmp_arr)
+            res_dict[mode_key]["frequency"].extend(frq_arr)
+            res_dict[mode_key]["keas"].extend(mach_arr * a_kts * np.sqrt(rho_slug_ft3/rho0_slug_ft3))
+            res_dict[mode_key]["ktas"].extend(mach_arr * a_kts)
+
+    # Convert all lists back to numpy arrays to maintain original datatype formatting
+    for mode_key in res_dict:
+        for data_key in res_dict[mode_key]:
+            res_dict[mode_key][data_key] = np.array(res_dict[mode_key][data_key])
 
     return res_dict
 

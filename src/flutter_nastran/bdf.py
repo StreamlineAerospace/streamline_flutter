@@ -11,34 +11,37 @@ Copyright (C) <2026>, Streamline Aerospace. All rights reserved.
 module contains functions for generating NASTRAN .bdf files for SOL 145 flutter analysis
 """
 
-def flutter_card(altitude_ft:float, Mach_sweep:list, freq_interval_Hz:list, reference_chord_in:float, output_dir:str, complex_mode_output:bool=False) -> str: 
-    """Generates a NASTRAN .bdf file containing commands and parameters for SOL 145 flutter sweep
 
-    Args:
-        altitude_ft (float): MSL altitude in feet
-        Mach_sweep (list): Linear spaced, increasing, array of Mach numbers to sweep over 
-        freq_interval_Hz (list): List of min and max frequency (in Hz) to survey flutter over
-        reference_chord_in (float): Reference chord length (typically mean aero chord) in inches
-        complex_mode_output (bool, optional): If True, sets up flutter card for single-point complex mode shape output for subsquent flutter animation. Defaults to False.
-
-    Returns:
-        str: filename of generated .bdf file
+def flutter_card(
+        altitude_ft:float, 
+        Mach_sweep:list, 
+        freq_interval_Hz:list, 
+        reference_chord_in:float, 
+        output_dir:str, 
+        complex_mode_output:bool=False) -> str: 
+    """Generates a NASTRAN .bdf file containing commands and parameters for SOL 145 flutter sweep.
+    Generates distinct FLUTTER/FLFACT cards for each Mach number to support DMIG subcases.
     """
-
     if complex_mode_output: 
         assert np.size(Mach_sweep) == 1
 
-    #calculate velocity in in/sec 
+    # Calculate velocity in in/sec 
     a_ft_s = atm.sonic_speed(h_ft=altitude_ft)
-    a_in_s = a_ft_s*12
+    a_in_s = a_ft_s * 12
 
-    rho_slinch = 0.000578704*atm.air_density(h_ft=altitude_ft)
-    dens_factor = atm.air_density(h_ft=altitude_ft)/atm.air_density(h_ft=0)
-    v_in_s = Mach_sweep*a_in_s
-
-    #calculate min and max reduced frequencies
-    freq_red_min_Hz = min(freq_interval_Hz)*math.pi*reference_chord_in/v_in_s
-    freq_red_max_Hz = max(freq_interval_Hz)*math.pi*reference_chord_in/v_in_s
+    rho_slinch = 0.000578704 * atm.air_density(h_ft=altitude_ft)
+    dens_factor = atm.air_density(h_ft=altitude_ft) / atm.air_density(h_ft=0)
+    
+    # Pre-calculate velocity bounds for each mach number based on frequency intervals
+    freq_red_min_Hz = []
+    freq_red_max_Hz = []
+    velocities_in_s = []
+    
+    for m in Mach_sweep:
+        v = m * a_in_s
+        velocities_in_s.append(v)
+        freq_red_min_Hz.append(min(freq_interval_Hz) * math.pi * reference_chord_in / v)
+        freq_red_max_Hz.append(max(freq_interval_Hz) * math.pi * reference_chord_in / v)
     
     model = BDF(debug=False, log=None)
 
@@ -57,68 +60,64 @@ $Input deck created:   {datetime.now().strftime('%d-%b-%y')}
 $-----------------------------------------------------------------------"""
 
     # -------------------------------------------------------------------------
-    # PARAM entries
+    # PARAM & AERO entries
     # -------------------------------------------------------------------------
-    model.add_param("VREF", [a_in_s], comment="Convert flutter output velocities from in/sec to Mach number")#[cite: 1]
-    model.add_param("SUPAERO", ["CPM"], comment="Use the CPM method for supersonic conditions")#[cite: 1]
+    model.add_param("VREF", [a_in_s], comment="Convert flutter output velocities from in/sec to Mach number")
+    model.add_param("SUPAERO", ["CPM"], comment="Use the CPM method for supersonic conditions")
     if complex_mode_output:
-        model.add_param(
-            "OPPHIPA",
-            [0],
-            comment="Output mode shapes to check the spline interpolation (also need DISP=ALL)",)
+        model.add_param("OPPHIPA", [0], comment="Output mode shapes to check spline interpolation")
 
-    # -------------------------------------------------------------------------
-    # AERO entry
-    # -------------------------------------------------------------------------
     model.add_aero(
         cref=float(reference_chord_in),
-        rho_ref=1.146E-7, #! not sure why this is constant, but reference code has it this way
+        rho_ref=1.146E-7,
         velocity=None,
         acsid=0,
         sym_xz=0,
         sym_xy=0,
-        comment="Aerodynamic physical data\n AeroCS Veloc RefC RhoRef SymXZ SymXY",)
+        comment="Aerodynamic physical data",
+    )
 
-    # -------------------------------------------------------------------------
-    # FLUTTER entry
-    # -------------------------------------------------------------------------
-    flutter_sid = 1000
     dens_sid = 1001
-    mach_sid = 1002
-    veloc_sid = 1003
-
-    model.add_flutter(
-        sid=flutter_sid,
-        method="PKNL",
-        density=dens_sid,
-        mach=mach_sid,
-        reduced_freq_velocity=veloc_sid,
-        comment="Flutter solution data\n Use PK non-looping (PKNL) flutter solution method",)
+    model.add_flfact(dens_sid, [round(dens_factor, 3)], comment="Density ratios for flutter solutions")
 
     # -------------------------------------------------------------------------
-    # FLFACT entries
+    # Generate Subcase-Specific FLUTTER & FLFACT entries
     # -------------------------------------------------------------------------
-    mach_factors = [round(m, 4) for m in Mach_sweep]
-    dens_factors = [round(dens_factor, 3)] * len(mach_factors)
-    veloc_factors = [round(v, 1) for v in v_in_s]
+    for i, m in enumerate(Mach_sweep):
+        # Create a unique ID for each Mach number (e.g., Mach 0.3 -> 1030)
+        fmethod_id = 1000 + int(round(m * 100))
+        mach_sid = fmethod_id + 1
+        veloc_sid = fmethod_id + 2
+        
+        mach_factor = round(m, 4)
+        
+        # Generate a narrow velocity band around the matched point velocity
+        v_base = velocities_in_s[i]
+        v_band = [v_base]
+        # Example narrow band: 0.8x to 1.2x matched velocity
+        if complex_mode_output:
+            v_band = [-v for v in v_band]
+            
+        veloc_factors = [round(v, 1) for v in v_band]
 
-    if complex_mode_output:
-        veloc_factors = [v*-1 for v in veloc_factors]
-
-    model.add_flfact(dens_sid, dens_factors, comment="Density ratios for match point flutter solutions")
-    model.add_flfact(mach_sid, mach_factors, comment="Mach numbers for match point flutter solutions")
-    model.add_flfact(veloc_sid, veloc_factors, comment="Velocities for match point flutter solutions")
-
-    # -------------------------------------------------------------------------
-    # MKAERO1 entries
-    # -------------------------------------------------------------------------
-    for i,m in enumerate(mach_factors):
-        # Scale k values inversely with Mach (or supply arbitrary dynamic lists)
+        model.add_flutter(
+            sid=fmethod_id,
+            method="PKNL",
+            density=dens_sid,
+            mach=mach_sid,
+            reduced_freq_velocity=veloc_sid,
+            comment=f"Flutter solution data for Mach {mach_factor}",
+        )
+        
+        model.add_flfact(mach_sid, [mach_factor])
+        model.add_flfact(veloc_sid, veloc_factors)
+        
+        # MKAERO1 entries (Global)
         k_scaled = np.logspace(np.log10(freq_red_min_Hz[i]), np.log10(freq_red_max_Hz[i]), num=8)
-        model.add_mkaero1(machs=[m], reduced_freqs=k_scaled)
+        model.add_mkaero1(machs=[mach_factor], reduced_freqs=k_scaled)
 
     # -------------------------------------------------------------------------
-    # Write Out and Re-parse to Validate
+    # Write Out 
     # -------------------------------------------------------------------------
     output_path = f"{output_dir}/flutter_{int(altitude_ft/1000)}kft"
     if complex_mode_output: 
@@ -126,92 +125,85 @@ $-----------------------------------------------------------------------"""
     output_path += ".bdf"
 
     model.write_bdf(output_path, size=8, is_double=False)
-    print(f"Deck successfully generated: {output_path}")
-
-    # Self-validation check
-    verify_model = BDF(debug=False, log=None)
-    verify_model.read_bdf(output_path, xref=False)
-
-    #add header comment and delete unnecessary comments from pyNastran
+    
     with open(output_path, "r") as f:
-        deck_lines = [
-            line for line in f if not line.strip().startswith("$pyNastran")
-        ]
+        deck_lines = [line for line in f if not line.strip().startswith("$pyNastran")]
     with open(output_path, "w") as f:
-        f.write(header_comment + "".join(deck_lines))
+        f.write(header_comment + "\n" + "".join(deck_lines))
 
     return output_path
 
 
-def generate_sol145_master_bdf(flutter_card_path:str, struct_card_path:str, aero_card_path:str, output_dir:str, spc_id:int, base_title:str, max_freq_Hz:float, min_freq_Hz:float=None, complex_mode_output:bool=False, aerosymflag:str="SYMMETRIC") -> str:
-    """Generates a master run .bdf fil SOL 145 flutter analysis
-
-    Args:
-        flutter_card_path (str): filepath of flutter .bdf file generated by flutter_card()
-        struct_card_path (str): filepath of structural .bdf file generated by split_nastran_deck()
-        aero_card_path (str): filepath of aero .bdf file generated by split_nastran_deck()
-        spc_id (int): index of structural model constraint set to be applied
-        base_title (str): short title describing analysis: Structure configuration, altitude, velocities, etc. 
-        max_freq_Hz (float): Maximum frequency, in Hz, to instruct solver to survey up to
-        min_freq_Hz (float, optional): frequency, in Hz, to ignore modes below - Use for filtering out rigid body mode
-        complex_mode_output (bool, optional): If True, sets up flutter card for single-point complex mode shape output for subsquent flutter animation. Defaults to False.
-        aerosymflag (str, optional): _description_. Defaults to "SYMMETRIC".
-
-    Returns:
-        str: _description_
+def generate_sol145_master_bdf(
+        flutter_card_path:str, 
+        struct_card_path:str, 
+        aero_card_path:str, 
+        output_dir:str, 
+        spc_id:int, 
+        base_title:str,
+        mach_list:list,  
+        max_freq_Hz:float, 
+        min_freq_Hz:float=None, 
+        complex_mode_output:bool=False, 
+        aerosymflag:str="SYMMETRIC") -> str:
+    """Generates a master run .bdf file for SOL 145 flutter analysis.
+    Adds subcase blocks if mach_list is provided to support DMIG matching.
     """
-    fid = 30 #flutter identification number #!Hardcoded
-
+    fid = 1000 
     flutter_card_name = flutter_card_path.split("/")[-1]
- 
     title = struct_card_path.split("/")[-1]
     title = title.split("_STRUCT")[0]
-    output_file = f"{output_dir}/xRUN_{title}_{flutter_card_name.split(".")[0]}.bdf"
+    output_file = f"{output_dir}/xRUN_{title}_{flutter_card_name.split('.')[0]}.bdf"
  
     pre_bulk_lines = ["INIT MASTER(S)\n",
                         "NASTRAN SYSTEM(442)=-1,SYSTEM(319)=1\n",
-                        "SOL 145\n", #NASTRAN solver
-                        "TIME 10000\n", #maximum CPU time (in minutes) allowed for the job
-                        "$DIAG 12\n", #Requests diagnostic output or special options.
+                        "SOL 145\n",
+                        "TIME 10000\n",
+                        "$DIAG 12\n", 
                         "GEOMCHECK, NONE\n",
                         "CEND\n",
                         f"    TITLE = {base_title}\n",
-                        "    ECHO = NONE\n", #NONE Suppresses the printing of grid points, elements, and bulk data listings in the output file to keep the .f06 file compact
-                        f"    METHOD = {fid}\n", #The METHOD command can be used to select a method for real eigenvalue extraction.
-                        "    FMETHOD = 1000\n", #Used to specify the parameters for aerodynamic flutter analysis, by referencing a FLUTTER Bulk Data Entry.
-                        f"    AESYMXZ = {aerosymflag}\n", #aerodynamic xz plane of symmetry flag [SYMMETRIC/ANTISYMMETRIC/ASYMMETRIC]
-                        f"    SPC={spc_id}\n",] #Identification number of single-point constraint set.
+                        "    ECHO = NONE\n",
+                        f"    METHOD = {fid}\n", 
+                        f"    AESYMXZ = {aerosymflag}\n",
+                        f"    SPC={spc_id}\n"]
+    
     if complex_mode_output: 
         pre_bulk_lines.append("    DISP=ALL\n")
 
-    pre_bulk_lines.append("BEGIN BULK\n")
+    # If no explicit mach list is passed, write the global FMETHOD parameter
+    if mach_list is None:
+        pre_bulk_lines.insert(-2, "    FMETHOD = 1000\n")
+    # If mach list is passed, define separate subcases for DMIG mapping
+    else:
+        for idx, mach in enumerate(mach_list):
+            fmethod_id = 1000 + int(round(mach * 100))
+            pre_bulk_lines.append(f"\nSUBCASE {idx + 1}\n")
+            pre_bulk_lines.append(f"    LABEL = Mach {mach:.3f} Matched Point\n")
+            pre_bulk_lines.append(f"    FMETHOD = {fmethod_id}\n")
+
+    pre_bulk_lines.append("\nBEGIN BULK\n")
 
     model = BDF(debug=False, log=None)
-    # PARAM Cards
-    model.add_param("POST", [-1]) #Generates an OUTPUT2 results file.
-    model.add_param("OGEOM", ["NO"]) #output model data to .op2 file? 
-    model.add_param("AUTOSPC", ["NO"]) #Automatically constrain degrees-of-freedom with no stiffness.
-    model.add_param("AUTOSPRT", ["NO"]) #Activate inertia relief and auto-support degree-of-freedom generation.
-    model.add_param("WTMASS", [0.00259]) #Converts weights to masses using this multiplier.
+    model.add_param("POST", [-1])
+    model.add_param("OGEOM", ["NO"])
+    model.add_param("AUTOSPC", ["NO"])
+    model.add_param("AUTOSPRT", ["NO"])
+    model.add_param("WTMASS", [0.00259])
 
     if min_freq_Hz is not None: 
-        assert min_freq_Hz > 0 and min_freq_Hz < max_freq_Hz
-        model.add_param("LFREQ", [min_freq_Hz]) #Used to remove the Rigid Body Modes from the Modal Space.
+        model.add_param("LFREQ", [min_freq_Hz])
 
-    # EIGRL Card
     model.add_eigrl(
         sid=fid,
         v1=min_freq_Hz,
         v2=float(max_freq_Hz),
         msglvl=0,
         norm="MASS",
-        comment="EIGRL card for eigenvalue extraction",
     )
 
-    # Write the cards to a temporary file via pyNastran
     temp_bulk_path = output_file + ".tmp"
     model.write_bdf(temp_bulk_path, size=8, is_double=False)
-
 
     with open(temp_bulk_path, "r") as f:
         bulk_cards = [line for line in f if not line.strip().startswith("$pyNastran") and not line.strip().startswith("ENDDATA")]
@@ -219,32 +211,30 @@ def generate_sol145_master_bdf(flutter_card_path:str, struct_card_path:str, aero
     if os.path.exists(temp_bulk_path):
         os.remove(temp_bulk_path)
 
-    # Comments and INCLUDE statements for remaining bulk data
     include_section = (
         "$\n"
         "$Structural Model\n"
-        f"INCLUDE '{struct_card_path.split("/")[-1]}'\n"
+        f"INCLUDE '{struct_card_path.split('/')[-1]}'\n"
         "$\n"
         "$Aero Model\n"
-        f"INCLUDE '{aero_card_path.split("/")[-1]}'\n"
+        f"INCLUDE '{aero_card_path.split('/')[-1]}'\n"
         "$\n"
         "$Flutter Card   \n"
-        f"INCLUDE '{flutter_card_path.split("/")[-1]}'\n"
+        f"INCLUDE '{flutter_card_path.split('/')[-1]}'\n"
         "$\n"
         "ENDDATA\n")
 
     with open(output_file, "w") as f:
         [f.write(line) for line in pre_bulk_lines]
-        
         f.writelines(bulk_cards)
         f.write(include_section)
-
-    print(f"Master SOL 145 deck generated: {output_file}")
 
     return output_file
 
 
-def split_nastran_deck(input_bdf_path: str, output_dir: str) -> list:
+def split_nastran_deck(
+        input_bdf_path: str, 
+        output_dir: str) -> list:
     """Splits a combined Nastran BDF into structural and aerodynamic models, discarding solution and executive control directives.
     Args:
         input_bdf_path (str): filepath of NASTRAN .bdf model from FEMAP file>export>analysis model
@@ -411,90 +401,228 @@ def split_nastran_deck(input_bdf_path: str, output_dir: str) -> list:
 
 
 def add_whirl_flutter_dmig_to_bdf(
-    xRUN_bdf_filepath: str, 
-    hub_grid_id: int, 
-    gyro_dict: dict, 
-    aero_damping_dict: dict, 
-    aero_stiffness_dict: dict
+    xRUN_bdf_filepath: str,
+    hub_grid_id: int,
+    mach_matrices: dict,
+    num_complex_roots: int = 30
 ):
     """
-    Reads a master NASTRAN BDF, applies whirl flutter DMIG matrices from dictionaries, 
-    adds complex eigenvalue solvers, and saves a new file with '_WHIRL' appended.
-    
-    Dictionaries should be formatted with (row_dof, col_dof) as keys:
-    Example: gyro_dict = {(5, 6): 1885.0, (6, 5): -1885.0}
+    Applies whirl flutter DMIG matrices across multiple Mach numbers, adds the EIGC complex
+    eigenvalue solver, and links the unique matrices to pre-existing SUBCASE blocks.
+
+    Args:
+        xRUN_bdf_filepath (str): Path to the master xRUN .bdf file.
+        hub_grid_id (int): Structural GRID ID of the propeller hub.
+        mach_matrices (dict): {mach_float: (gyro_dict, aero_damping_dict, aero_stiffness_dict)}
+        num_complex_roots (int): Number of desired complex roots (ND) on the EIGC card.
     """
-    
-    # 1. Load the existing master BDF model
-    model = BDF()
-    model.read_bdf(xRUN_bdf_filepath)
-    
-    # 2. Apply Nastran Sign Conventions for the Left-Hand Side
-    # [K_DMIG] = -[K_aero]
-    # [B_DMIG] = [G_gyro] - [B_aero]
-    k_dmig = {}
-    b_dmig = {}
-    
-    # Process Aerodynamic Stiffness
-    for (r, c), val in aero_stiffness_dict.items():
-        if c not in k_dmig: k_dmig[c] = {}
-        k_dmig[c][r] = -val
-        
-    # Process combined Gyroscopic and Aerodynamic Damping
-    all_b_keys = set(gyro_dict.keys()).union(set(aero_damping_dict.keys()))
-    for (r, c) in all_b_keys:
-        g_val = gyro_dict.get((r, c), 0.0)
-        ba_val = aero_damping_dict.get((r, c), 0.0)
-        combined_val = g_val - ba_val
-        
-        if abs(combined_val) > 1e-12: # Filter out numeric zeros
-            if c not in b_dmig: b_dmig[c] = {}
-            b_dmig[c][r] = combined_val
+    if not isinstance(hub_grid_id, int):
+        raise ValueError(f"hub_grid_id must be an integer, got {type(hub_grid_id)}: {hub_grid_id}")
 
-    # 3. Helper Function to write square, unsymmetric DMIG matrices (IFO=1)
-    def write_dmig_matrix(matrix_name, matrix_dict):
-        if not matrix_dict: return
-        
-        # Add DMIG Header: IFO=1 (Square), TIN=2 (Double Prec), TOUT=2 (Double Prec)
-        model.add_card(['DMIG', matrix_name, 0, 1, 2, 2], 'DMIG')
-        
-        # Iterate over columns (CJ)
+    cont_counter = 1
+
+    def next_cont() -> str:
+        nonlocal cont_counter
+        tag = f"*C{cont_counter:<6d}"  # Exactly 8 characters
+        cont_counter += 1
+        return tag
+
+    def format_dmig_large_field(matrix_name: str, matrix_dict: dict) -> list[str]:
+        """Formats a square unsymmetric double-precision DMIG matrix in 16-char large-field format."""
+        if not matrix_dict:
+            return []
+
+        lines = [
+            "$" + "-" * 79 + "\n",
+            f"$ DMIG Matrix {matrix_name}\n"
+        ]
+
+        # Header entry: GJ=0, IFO=1 (Square), TIN=2 (Double Prec), TOUT=2 (Double Prec), POLAR=0
+        c_hdr = next_cont()
+        lines.append(f"{'DMIG*':<8}{matrix_name:>16}{0:>16d}{1:>16d}{2:>16d}{c_hdr}\n")
+        lines.append(f"{c_hdr}{2:>16d}{0:>16d}{'':>16}{'':>16}\n")
+
+        # Column and Row entries
         for col in sorted(matrix_dict.keys()):
-            # Start column card: ['DMIG', NAME, GJ, CJ, blank]
-            col_card = ['DMIG', matrix_name, hub_grid_id, col, None]
-            
-            # Iterate over rows (CI) in this column
-            for row in sorted(matrix_dict[col].keys()):
-                val = matrix_dict[col][row]
-                # Append Row Grid (GI), Row DOF (CI), Real Value (X), Imag Value (Blank)
-                col_card.extend([hub_grid_id, row, val, None])
-            
-            # Add column to model (pyNastran automatically formats 8-field continuations)
-            model.add_card(col_card, 'DMIG')
+            rows = sorted(matrix_dict[col].keys())
+            if not rows:
+                continue
 
-    # Inject the matrices into the Bulk Data
-    write_dmig_matrix('KAEROP', k_dmig)
-    write_dmig_matrix('BPROPTOT', b_dmig)
+            c_curr = next_cont()
+            lines.append(f"{'DMIG*':<8}{matrix_name:>16}{hub_grid_id:>16d}{int(col):>16d}{'':>16}{c_curr}\n")
 
-    # 4. Add Complex Eigenvalue Solver to Bulk Data
-    # Required for skew-symmetric/unsymmetric matrices
-    # Format: [EIGC, SID, METHOD, NORM, G, C, E, ND]
-    model.add_card(['EIGC', 20, 'HESS', 'MAX', None, None, None, None, 30], 'EIGC')
+            for idx, row in enumerate(rows):
+                val = float(matrix_dict[col][row])
+                has_more = idx < (len(rows) - 1)
+                c_next = next_cont() if has_more else ""
+                lines.append(
+                    f"{c_curr}{hub_grid_id:>16d}{int(row):>16d}{val:>16.9E}{'':>16}{c_next}\n"
+                )
+                c_curr = c_next
 
-    # 5. Update Case Control Deck
-    cc = model.case_control_deck
-    if cc is not None:
-        if not cc.has_parameter('CMETHOD'):
-            cc.add_parameter_to_global_subcase('CMETHOD', 20)
-        cc.add_parameter_to_global_subcase('K2PP', 'KAEROP')
-        cc.add_parameter_to_global_subcase('B2PP', 'BPROPTOT')
+        return lines
 
-    # 6. Save the modified BDF with "_WHIRL" appended
+    # 1. Build all DMIG and EIGC bulk data lines
+    dmig_cards = []
+    for mach in sorted(mach_matrices.keys()):
+        gyro_dict, damping_dict, stiffness_dict = mach_matrices[mach]
+        m_id = int(round(float(mach) * 100))
+        k_name = f"KPROP{m_id}"
+        b_name = f"BPROP{m_id}"
+
+        # Apply Nastran Left-Hand-Side sign conventions:
+        # [K_DMIG] = -[K_aero]
+        # [B_DMIG] = [G_gyro] - [B_aero]
+        k_dmig = {}
+        for (r, c), val in stiffness_dict.items():
+            if abs(val) > 1e-12:
+                k_dmig.setdefault(c, {})[r] = -float(val)
+
+        b_dmig = {}
+        all_b_keys = set(gyro_dict.keys()).union(set(damping_dict.keys()))
+        for (r, c) in all_b_keys:
+            val = float(gyro_dict.get((r, c), 0.0)) - float(damping_dict.get((r, c), 0.0))
+            if abs(val) > 1e-12:
+                b_dmig.setdefault(c, {})[r] = val
+
+        dmig_cards.extend(format_dmig_large_field(k_name, k_dmig))
+        dmig_cards.extend(format_dmig_large_field(b_name, b_dmig))
+
+    # Add EIGC card (Field 8 = ND = num_complex_roots)
+    dmig_cards.append("$DYNAMIC\n")
+    dmig_cards.append(
+        f"{'EIGC':<8}{20:>8d}{'HESS':>8}{'MAX':>8}{'':>8}{'':>8}{'':>8}{num_complex_roots:>8d}\n"
+    )
+
+    # 2. Inject Case Control selections and Bulk Data cards into a new _WHIRL deck
     file_dir, file_name = os.path.split(xRUN_bdf_filepath)
     name, ext = os.path.splitext(file_name)
     output_bdf_path = os.path.join(file_dir, f"{name}_WHIRL{ext}")
+
+    with open(xRUN_bdf_filepath, "r") as fin, open(output_bdf_path, "w") as fout:
+        case_control = True
+        for line in fin:
+            if line.strip() == "BEGIN BULK":
+                case_control = False
+
+            if line.strip() == "ENDDATA":
+                fout.writelines(dmig_cards)
+                fout.write(line)
+                continue
+
+            if case_control:
+                if line.strip().startswith("METHOD"):
+                    fout.write(line)
+                    fout.write("    CMETHOD = 20\n")
+                    continue
+
+                if line.strip().startswith("FMETHOD"):
+                    fout.write(line)
+                    parts = line.split("=")
+                    if len(parts) == 2:
+                        try:
+                            fmethod_id = int(parts[1].strip())
+                            if fmethod_id > 1000:
+                                m_id = fmethod_id - 1000
+                                fout.write(f"    K2PP = KPROP{m_id}\n")
+                                fout.write(f"    B2PP = BPROP{m_id}\n")
+                        except ValueError:
+                            pass
+                    continue
+
+            fout.write(line)
+
+    print(f"Successfully generated DMIG matched-point deck: {output_bdf_path}")
+    return output_bdf_path
+
+
+def update_struct_bdf_hub_grid(
+    struct_bdf_filepath: str, 
+    hub_grid_id: int, 
+    x_vector: list, 
+    z_vector: list
+) -> str:
+    """
+    Directly modifies a Nastran structural BDF text file to create a custom local 
+    coordinate system and assigns it to the CD field of a specific GRID card.
+    """
     
-    model.write_bdf(output_bdf_path)
-    print(f"Successfully generated: {output_bdf_path}")
+    # 1. Parse the file to find the Hub GRID coordinates and the highest CORD ID
+    hub_found = False
+    origin = np.zeros(3)
+    max_cid = 0
+    lines = []
     
-    return output_bdf_path 
+    with open(struct_bdf_filepath, 'r') as f:
+        lines = f.readlines()
+        
+    for line in lines:
+        if line.startswith('CORD2') or line.startswith('CORD1'):
+            try:
+                cid = int(line[8:16].strip())
+                if cid > max_cid:
+                    max_cid = cid
+            except ValueError:
+                pass
+                
+        # Look for the target GRID card
+        if line.startswith('GRID    ') or line.startswith('GRID,'):
+            # Parse fixed 8-character fields
+            if ',' not in line:
+                gid_str = line[8:16].strip()
+                if gid_str and int(gid_str) == hub_grid_id:
+                    hub_found = True
+                    # Fields 3, 4, 5 are X, Y, Z
+                    x_str = line[24:32].strip()
+                    y_str = line[32:40].strip()
+                    z_str = line[40:48].strip()
+                    
+                    # Nastran sometimes omits the 'E' in scientific notation (e.g., 3.6-4)
+                    def parse_nastran_float(s):
+                        if '-' in s[1:]:
+                            s = s[0] + s[1:].replace('-', 'E-')
+                        if '+' in s[1:]:
+                            s = s[0] + s[1:].replace('+', 'E+')
+                        return float(s)
+                        
+                    origin[0] = parse_nastran_float(x_str)
+                    origin[1] = parse_nastran_float(y_str)
+                    origin[2] = parse_nastran_float(z_str)
+
+    if not hub_found:
+        raise ValueError(f"GRID {hub_grid_id} not found in {struct_bdf_filepath}.")
+
+    # 2. Calculate the new CORD2R geometry
+    new_cid = max_cid + 1
+    z_point = origin + np.array(z_vector)
+    x_point = origin + np.array(x_vector)
+
+    # 3. Format the new CORD2R card (8-character fields)
+    cord2r_lines = [
+        "$ Propeller Hub Local Coordinate System (DMIG Alignment)\n",
+        f"{'CORD2R':<8}{new_cid:>8d}{0:>8d}{origin[0]:>8.2f}{origin[1]:>8.2f}{origin[2]:>8.2f}{z_point[0]:>8.2f}{z_point[1]:>8.2f}+CRD{new_cid:03d}\n",
+        f"+CRD{new_cid:03d}{z_point[2]:>8.2f}{x_point[0]:>8.2f}{x_point[1]:>8.2f}{x_point[2]:>8.2f}\n"
+    ]
+
+    # 4. Write the modified file back out
+    with open(struct_bdf_filepath, 'w') as f:
+        # Inject the CORD2R card right after the structural header
+        injected_cord = False
+        for line in lines:
+            if not injected_cord and not line.startswith('$'):
+                f.writelines(cord2r_lines)
+                injected_cord = True
+                
+            # Modify the target GRID card
+            if line.startswith('GRID    ') and int(line[8:16].strip()) == hub_grid_id:
+                # Nastran GRID format:
+                # 1:GRID, 2:ID, 3:CP, 4:X1, 5:X2, 6:X3, 7:CD, 8:PS, 9:SEID
+                # We need to overwrite characters 48-56 (Field 7, CD)
+                prefix = line[:48]
+                suffix = line[56:] if len(line) > 56 else "\n"
+                f.write(f"{prefix}{new_cid:>8d}{suffix}")
+            else:
+                f.write(line)
+                
+    print(f"Successfully added CORD2R {new_cid} and updated GRID {hub_grid_id} in {struct_bdf_filepath}.")
+    return struct_bdf_filepath
