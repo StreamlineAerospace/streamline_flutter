@@ -2,6 +2,7 @@
 import numpy as np
 from flutter_nastran import stdatm1976 as atm 
 from pyNastran.bdf.bdf import BDF
+from pyNastran.bdf.cards import dmig
 from datetime import datetime
 import math
 import os
@@ -400,7 +401,7 @@ def split_nastran_deck(
     return output_struc_path, output_aero_path
 
 
-def add_whirl_flutter_dmig_to_bdf(
+def add_whirl_flutter_dmig_to_bdf2(
     xRUN_bdf_filepath: str,
     hub_grid_id: int,
     mach_matrices: dict,
@@ -536,6 +537,127 @@ def add_whirl_flutter_dmig_to_bdf(
     return output_bdf_path
 
 
+def add_whirl_flutter_dmig_to_bdf(
+    xRUN_bdf_filepath: str,
+    hub_grid_id: int,
+    mach_matrices: dict,
+    num_complex_roots: int = 30
+):
+    """
+    Applies whirl flutter DMIG matrices using PyNastran as a strict formatter, 
+    but safely appends the cards as raw text to preserve INCLUDE statements.
+    """
+    if not isinstance(hub_grid_id, int):
+        raise ValueError("hub_grid_id must be an integer")
+
+    # 1. Spin up a blank pyNastran model just to handle the strict formatting
+    temp_model = BDF()
+
+    # 2. Build all DMIG cards in the temporary model
+    for mach in sorted(mach_matrices.keys()):
+        gyro_dict, damping_dict, stiffness_dict = mach_matrices[mach]
+        m_id = int(round(float(mach) * 100))
+        
+        k_name = f"KPROP{m_id}"
+        b_name = f"BPROP{m_id}"
+
+        # Format Stiffness Matrix (KPROP)
+        k_gcj, k_gci, k_real = [], [], []
+        for (r, c), val in stiffness_dict.items():
+            if abs(val) > 1e-12:
+                k_gcj.append((hub_grid_id, int(c)))
+                k_gci.append((hub_grid_id, int(r)))
+                k_real.append(-float(val)) # Nastran LHS sign flip
+
+        if k_real:
+            temp_model.add_dmig(
+                name=k_name,
+                ifo=1, tin=1, tout=1, polar=0, ncols=None,
+                GCj=k_gcj, GCi=k_gci, Real=k_real
+            )
+
+        # Format Damping Matrix (BPROP = Gyro - Aero Damping)
+        b_gcj, b_gci, b_real = [], [], []
+        all_b_keys = set(gyro_dict.keys()).union(set(damping_dict.keys()))
+        for (r, c) in all_b_keys:
+            val = float(gyro_dict.get((r, c), 0.0)) - float(damping_dict.get((r, c), 0.0))
+            if abs(val) > 1e-12:
+                b_gcj.append((hub_grid_id, int(c)))
+                b_gci.append((hub_grid_id, int(r)))
+                b_real.append(val)
+
+        if b_real:
+            temp_model.add_dmig(
+                name=b_name,
+                ifo=1, tin=1, tout=1, polar=0, ncols=None,
+                GCj=b_gcj, GCi=b_gci, Real=b_real
+            )
+
+    # 3. Add the EIGC card for Complex Eigenvalue Extraction (Method 20)
+    temp_model.add_eigc(
+        sid=20, 
+        method='HESS', 
+        neigenvalues=num_complex_roots,
+        norm='MAX', 
+        grid=None, 
+        component=None, 
+        epsilon=None
+    )
+
+    # 4. Extract the strictly formatted lines directly from the PyNastran objects
+    # This bypasses the need for model.write_bdf() and its INCLUDE resolution
+    dmig_cards = []
+    
+    # Grab EIGC lines
+    for eid, eigc in temp_model.methods.items():
+        dmig_cards.append(eigc.write_card(size=8, is_double=False))
+        
+    # Grab DMIG lines
+    for name, dmig in temp_model.dmigs.items():
+        dmig_cards.append(dmig.write_card(size=8, is_double=False))
+
+    dmig_cards.append("$DYNAMIC\n")
+    
+    # 5. Inject into the original master deck text file
+    file_dir, file_name = os.path.split(xRUN_bdf_filepath)
+    name, ext = os.path.splitext(file_name)
+    output_bdf_path = os.path.join(file_dir, f"{name}_WHIRL{ext}")
+
+    with open(xRUN_bdf_filepath, "r") as fin, open(output_bdf_path, "w") as fout:
+        case_control = True
+        for line in fin:
+            if line.strip() == "BEGIN BULK":
+                case_control = False
+
+            if line.strip() == "ENDDATA":
+                fout.writelines(dmig_cards)
+                fout.write(line)
+                continue
+
+            if case_control:
+                if line.strip().startswith("METHOD"):
+                    fout.write(line)
+                    fout.write("    CMETHOD = 20\n")
+                    continue
+
+                if line.strip().startswith("FMETHOD"):
+                    fout.write(line)
+                    parts = line.split("=")
+                    if len(parts) == 2:
+                        try:
+                            fmethod_id = int(parts[1].strip())
+                            if fmethod_id > 1000:
+                                m_id = fmethod_id - 1000
+                                fout.write(f"    K2PP = KPROP{m_id}\n")
+                                fout.write(f"    B2PP = BPROP{m_id}\n")
+                        except ValueError:
+                            pass
+                    continue
+            fout.write(line)
+
+    return output_bdf_path
+
+
 def update_struct_bdf_hub_grid(
     struct_bdf_filepath: str, 
     hub_grid_id: int, 
@@ -546,8 +668,6 @@ def update_struct_bdf_hub_grid(
     Directly modifies a Nastran structural BDF text file to create a custom local 
     coordinate system and assigns it to the CD field of a specific GRID card.
     """
-    
-    # 1. Parse the file to find the Hub GRID coordinates and the highest CORD ID
     hub_found = False
     origin = np.zeros(3)
     max_cid = 0
@@ -567,22 +687,17 @@ def update_struct_bdf_hub_grid(
                 
         # Look for the target GRID card
         if line.startswith('GRID    ') or line.startswith('GRID,'):
-            # Parse fixed 8-character fields
             if ',' not in line:
                 gid_str = line[8:16].strip()
                 if gid_str and int(gid_str) == hub_grid_id:
                     hub_found = True
-                    # Fields 3, 4, 5 are X, Y, Z
                     x_str = line[24:32].strip()
                     y_str = line[32:40].strip()
                     z_str = line[40:48].strip()
                     
-                    # Nastran sometimes omits the 'E' in scientific notation (e.g., 3.6-4)
                     def parse_nastran_float(s):
-                        if '-' in s[1:]:
-                            s = s[0] + s[1:].replace('-', 'E-')
-                        if '+' in s[1:]:
-                            s = s[0] + s[1:].replace('+', 'E+')
+                        if '-' in s[1:]: s = s[0] + s[1:].replace('-', 'E-')
+                        if '+' in s[1:]: s = s[0] + s[1:].replace('+', 'E+')
                         return float(s)
                         
                     origin[0] = parse_nastran_float(x_str)
@@ -592,37 +707,32 @@ def update_struct_bdf_hub_grid(
     if not hub_found:
         raise ValueError(f"GRID {hub_grid_id} not found in {struct_bdf_filepath}.")
 
-    # 2. Calculate the new CORD2R geometry
+    # Calculate the new CORD2R geometry
     new_cid = max_cid + 1
     z_point = origin + np.array(z_vector)
     x_point = origin + np.array(x_vector)
 
-    # 3. Format the new CORD2R card (8-character fields)
+    # FIXED CORD2R FORMAT: Ensure z_point[2] (B3) is safely on the first line
     cord2r_lines = [
         "$ Propeller Hub Local Coordinate System (DMIG Alignment)\n",
-        f"{'CORD2R':<8}{new_cid:>8d}{0:>8d}{origin[0]:>8.2f}{origin[1]:>8.2f}{origin[2]:>8.2f}{z_point[0]:>8.2f}{z_point[1]:>8.2f}+CRD{new_cid:03d}\n",
-        f"+CRD{new_cid:03d}{z_point[2]:>8.2f}{x_point[0]:>8.2f}{x_point[1]:>8.2f}{x_point[2]:>8.2f}\n"
+        f"{'CORD2R':<8}{new_cid:>8d}{0:>8d}{origin[0]:>8.2f}{origin[1]:>8.2f}{origin[2]:>8.2f}{z_point[0]:>8.2f}{z_point[1]:>8.2f}{z_point[2]:>8.2f}+CRD{new_cid:03d}\n",
+        f"+CRD{new_cid:03d}{x_point[0]:>8.2f}{x_point[1]:>8.2f}{x_point[2]:>8.2f}\n"
     ]
 
-    # 4. Write the modified file back out
+    # Write the modified file back out
     with open(struct_bdf_filepath, 'w') as f:
-        # Inject the CORD2R card right after the structural header
         injected_cord = False
         for line in lines:
             if not injected_cord and not line.startswith('$'):
                 f.writelines(cord2r_lines)
                 injected_cord = True
                 
-            # Modify the target GRID card
+            # Overwrite Field 7 (CD) on the specific hub GRID
             if line.startswith('GRID    ') and int(line[8:16].strip()) == hub_grid_id:
-                # Nastran GRID format:
-                # 1:GRID, 2:ID, 3:CP, 4:X1, 5:X2, 6:X3, 7:CD, 8:PS, 9:SEID
-                # We need to overwrite characters 48-56 (Field 7, CD)
                 prefix = line[:48]
                 suffix = line[56:] if len(line) > 56 else "\n"
                 f.write(f"{prefix}{new_cid:>8d}{suffix}")
             else:
                 f.write(line)
                 
-    print(f"Successfully added CORD2R {new_cid} and updated GRID {hub_grid_id} in {struct_bdf_filepath}.")
     return struct_bdf_filepath

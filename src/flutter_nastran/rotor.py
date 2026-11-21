@@ -126,8 +126,6 @@ def generate_whirl_flutter_dictionaries(omega, Ixx, rho, V, D, C_k, C_b):
     Generates dimensional NASTRAN DMIG dictionaries for gyroscopic, aerodynamic 
     stiffness, and aerodynamic damping matrices.
     
-    #! CHECK OVER EQUATIONS!
-
     Parameters:
     - omega: Propeller speed (rad/s). Positive assumes clockwise rotation looking forward.
     - Ixx: Propeller polar moment of inertia about the spin axis.
